@@ -11,18 +11,19 @@ from sklearn.preprocessing import (
 import torch
 import argparse
 from collections import namedtuple, OrderedDict
+from .config import datadir
+from .tensor_dict import TensorDict
 
 
 Data = namedtuple(
     "Data",
     [
-        "X",
-        "y",
+        "tensor_dict",
+        "all_fields",
         "vocab_size",
-        "output_map",
-        "regression_transformer",
+        "regression_transformers",
         "train_mask",
-        "val_mask",
+        "valid_mask",
     ],
 )
 
@@ -211,7 +212,7 @@ def get_targets(df):
     return targets
 
 
-def get_nuclear_data(recreate=False):
+def get_nuclear_data(datadir, recreate=False):
     def lc_read_csv(url):
         req = urllib.request.Request("https://nds.iaea.org/relnsd/v0/data?" + url)
         req.add_header(
@@ -220,16 +221,16 @@ def get_nuclear_data(recreate=False):
         )
         return pd.read_csv(urllib.request.urlopen(req))
 
-    if not os.path.exists("data"):
-        os.mkdir("data")
+    unclean_data = os.path.join(datadir, "ground_states.csv")
     if recreate or not os.path.exists("data/ground_states.csv"):
         df = lc_read_csv("fields=ground_states&nuclides=all")
-        df.to_csv("data/ground_states.csv", index=False)
+        df.to_csv(unclean_data, index=False)
     else:
         # df = pd.read_csv("data/ground_states.csv")
-        df2 = pd.read_csv("data/ame2020.csv").set_index(["z", "n"])
+        data_2020 = os.path.join(datadir, "ame2020.csv")
+        df2 = pd.read_csv(data_2020).set_index(["z", "n"])
         df2 = df2[~df2.index.duplicated(keep="first")]
-        df = pd.read_csv("data/ground_states.csv").set_index(["z", "n"])
+        df = pd.read_csv(unclean_data).set_index(["z", "n"])
         df["binding_unc"] = df2.binding_unc
         df["binding_sys"] = df2.binding_sys
         df.reset_index(inplace=True)
@@ -284,7 +285,10 @@ def _train_test_split(size, train_frac, seed=1):
     return train_mask, ~train_mask
 
 
-def prepare_nuclear_data(config: argparse.Namespace, recreate: bool = False):
+def prepare_nuclear_data(
+    config: argparse.Namespace, recreate: bool = False, datadir=datadir
+):
+    # TODO simplify this function
     """Prepare data to be used for training. Transforms data to tensors, gets tokens X,targets y,
     vocab size and output map which is a dict of {target:output_shape}. Usually output_shape is 1 for regression
     and n_classes for classification.
@@ -294,7 +298,7 @@ def prepare_nuclear_data(config: argparse.Namespace, recreate: bool = False):
         recreate (bool, optional): Force re-download of data and save to csv. Defaults to False.
     returns (Data): namedtuple of X, y, vocab_size, output_map, quantile_transformer
     """
-    df = get_nuclear_data(recreate=recreate)
+    df = get_nuclear_data(datadir, recreate=recreate)
     targets = get_targets(df)
 
     X = torch.tensor(targets[["z", "n"]].values)
@@ -318,34 +322,40 @@ def prepare_nuclear_data(config: argparse.Namespace, recreate: bool = False):
         output_map[target] = 1
 
     reg_columns = list(config.TARGETS_REGRESSION)
-    feature_transformer = MinMaxScaler()
-    if len(reg_columns) > 0:
-        targets[reg_columns] = feature_transformer.fit_transform(
-            targets[reg_columns].values
+    feature_transformers = dict()
+    for col in reg_columns:
+        trafo = MinMaxScaler()
+        targets[[col]] = trafo.fit_transform(
+            targets[[col]].values
         )
+        feature_transformers[col] = trafo
 
     # don't consider nuclei with high uncertainty in binding energy
     # BUT only for evaluation!
     # except_binding = (df.binding_unc * (df.z + df.n) > 100).values
     # targets.loc[test_mask.numpy() & except_binding, "binding_energy"] = np.nan
 
-    y = torch.tensor(targets[list(output_map.keys())].values).float()
+    pred_table = torch.tensor(targets[list(output_map.keys())].values).float()
 
-    # Time to flatten everything
-    X = torch.vstack(
-        [torch.tensor([*x, task]) for x in X for task in torch.arange(len(output_map))]
-    )
-    y = y.flatten().view(-1, 1)
     train_mask, test_mask = _train_test_split(
-        len(y), config.TRAIN_FRAC, seed=config.SEED
+        len(pred_table), config.TRAIN_FRAC, seed=config.SEED
+    )
+
+    all_fields = OrderedDict(z=1, n=1, **output_map)
+
+    tensor_dict = TensorDict(
+        dict(
+            z=X[:, [0]],
+            n=X[:, [1]],
+            **{k: pred_table[:, [i]] for i, k in enumerate(output_map.keys())}
+        )
     )
 
     return Data(
-        X.to(config.DEV),
-        y.to(config.DEV),
+        tensor_dict.to(config.DEV),
+        all_fields,
         vocab_size,
-        output_map,
-        feature_transformer,
+        feature_transformers,
         train_mask.to(config.DEV),
         test_mask.to(config.DEV),
     )
