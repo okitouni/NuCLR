@@ -1,80 +1,48 @@
+import unittest
+import argparse
 import torch
-import typing as T
-from torch.nn import functional as F
-from sklearn.base import TransformerMixin
-from sklearn.preprocessing import StandardScaler
-from .tensor_dict import TensorDict
+import torch.nn.functional as F
+from ..loss import loss_by_task, metric_by_task, get_balanced_accuracy
 
 
-def accuracy(output: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    mask = ~torch.isnan(targets)
-    masked_target = targets[mask]
-    masked_output = output[mask]
-    return (masked_output.argmax(dim=-1) == masked_target).float().mean(dim=0)
+class TestMetrics(unittest.TestCase):
+    def test_loss_by_task(self):
+        output = torch.tensor([[0.1, 0.9, 0.1], [0.9, 0.1, 0.9]])
+        targets = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        output_map = {"a": 2, "b": 1}
+        config = argparse.Namespace()
+        config.TARGETS_CLASSIFICATION = ["a"]
+        config.TARGETS_REGRESSION = ["b"]
+        loss = loss_by_task(output, targets, output_map, config)
+        self.assertEqual(loss.shape, (2,))
+        self.assertEqual(loss[0], F.cross_entropy(output[:, :2], targets[:, 0].long()))
+        self.assertEqual(loss[1], F.mse_loss(output[:, 2], targets[:, 1].float()))
+
+    def test_get_balanced_accuracy(self):
+        # test with class weights that are not uniform
+        output = torch.tensor([[0.1, 0.9], [0.9, 0.1], [0.1, 0.9]])
+        targets = torch.tensor([1.0, 1.0, 0.0])
+        acc = get_balanced_accuracy(output, targets)
+        self.assertEqual(acc.item(), 0.25)
+
+    def test_metric_by_task(self):
+        # test metrics with class weights that are not uniform
+
+        output = torch.tensor([[0.1, 0.9, 0.1], [0.9, 0.1, 0.9]])
+        targets = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        output_map = {"a": 2, "b": 1}
+        config = argparse.Namespace()
+        config.TARGETS_CLASSIFICATION = ["a"]
+        config.TARGETS_REGRESSION = ["b"]
+        metrics = metric_by_task(output, targets, output_map, config)
+        self.assertEqual(metrics.shape, (2,))
+        self.assertEqual(
+            metrics[0], 100 * get_balanced_accuracy(output[:, :2], targets[:, 0].long())
+        )
+        self.assertEqual(
+            metrics[1], F.mse_loss(output[:, 2], targets[:, 1].float()).sqrt()
+        )
 
 
-def rmse(output: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    mask = ~torch.isnan(targets)
-    masked_target = targets[mask]
-    masked_output = output[mask]
-    return torch.sqrt(F.mse_loss(masked_output, masked_target, reduction="mean"))
-
-
-def loss_by_task(
-    prediction: TensorDict,
-    target: TensorDict,
-) -> TensorDict:
-    assert all(p in target.keys() for p in prediction.keys())
-
-    loss = prediction.copy()
-    for key in loss.keys():
-        mask = ~torch.isnan(target[key])
-        pred = prediction[key][mask]
-        tgt = target[key][mask]
-        if key in loss.categorical:
-            loss[key] = F.cross_entropy(pred, tgt.long())
-        elif key in loss.numerical:
-            loss[key] = F.mse_loss(pred, tgt)
-        else:
-           raise ValueError(f"Key {key} not classified as categorical or numerical.")
-
-    return loss 
-
-
-def get_eval_fn_for(task_name):
-  if task_name == "binding":
-    def eval_fn(output, nprotons, nneutrons):
-      return output * (nprotons + nneutrons)
-    return eval_fn
-  else:
-    return lambda x, *_: x
-
-@torch.inference_mode()
-def metric_by_task(
-    prediction: TensorDict,
-    target: TensorDict,
-    feature_transformers: dict,
-) -> TensorDict:
-    assert all(p in target.keys() for p in prediction.keys())
-
-    metrics = prediction.copy()
-    for key in metrics.keys():
-        mask = ~torch.isnan(target[key]).flatten()
-        pred = prediction[key][mask]
-        tgt = target[key][mask]
-        eval_fn = get_eval_fn_for(key)
-        nprotons = target["z"][mask]
-        nneutrons = target["n"][mask]
-        pred = eval_fn(pred, nprotons, nneutrons)
-        tgt = eval_fn(tgt, nprotons, nneutrons)
-        if key in metrics.categorical:
-            metrics[key] = accuracy(pred, tgt)
-        elif key in metrics.numerical:
-            pred = torch.tensor(feature_transformers[key].inverse_transform(pred.cpu()))
-            tgt = torch.tensor(feature_transformers[key].inverse_transform(tgt.cpu()))
-            metrics[key] = rmse(pred, tgt)
-        else:
-           raise ValueError(f"Key {key} not classified as categorical or numerical.")
-
-    return metrics 
-
+if __name__ == "__main__":
+    unittest.main(argv=[""], verbosity=2, exit=False)

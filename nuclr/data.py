@@ -12,7 +12,7 @@ import torch
 import argparse
 from collections import namedtuple, OrderedDict
 from .config import datadir
-from .tensor_dict import TensorDict
+from .utils.tensor_dict import TensorDict
 
 
 Data = namedtuple(
@@ -170,7 +170,7 @@ def get_isospin_from(string):
 
 def get_binding_energy_from(df):
     binding = df.binding.replace(" ", "nan").astype(float)
-    return binding  # - semi_empirical_mass_formula(df.z, df.n)
+    return binding - semi_empirical_mass_formula(df.z, df.n)
 
 
 def get_radius_from(df):
