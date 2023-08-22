@@ -1,6 +1,8 @@
 import torch
 from torch import nn
-from ..model import Retention, MSR, SwiGLU
+
+from ..modules import SwiGLU
+from ..model import Retention, MSR
 
 
 def toy_data(n, d_model=2):
