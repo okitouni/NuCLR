@@ -61,7 +61,7 @@ class MSR(nn.Module):
         super().__init__()
         self.ret = Retention(d_model)
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 2), SwiGLU(dim=-1), nn.Linear(d_model, d_model)
+            nn.Linear(d_model, d_model * 2), SwiGLU(), nn.Linear(d_model, d_model)
         )
         self.norm = nn.GroupNorm(n_heads, d_model)
 
