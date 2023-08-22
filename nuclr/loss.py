@@ -1,48 +1,53 @@
-import unittest
-import argparse
 import torch
-import torch.nn.functional as F
-from ..loss import loss_by_task, metric_by_task, get_balanced_accuracy
+from .utils import TensorDict, Fields
 
 
-class TestMetrics(unittest.TestCase):
-    def test_loss_by_task(self):
-        output = torch.tensor([[0.1, 0.9, 0.1], [0.9, 0.1, 0.9]])
-        targets = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-        output_map = {"a": 2, "b": 1}
-        config = argparse.Namespace()
-        config.TARGETS_CLASSIFICATION = ["a"]
-        config.TARGETS_REGRESSION = ["b"]
-        loss = loss_by_task(output, targets, output_map, config)
-        self.assertEqual(loss.shape, (2,))
-        self.assertEqual(loss[0], F.cross_entropy(output[:, :2], targets[:, 0].long()))
-        self.assertEqual(loss[1], F.mse_loss(output[:, 2], targets[:, 1].float()))
-
-    def test_get_balanced_accuracy(self):
-        # test with class weights that are not uniform
-        output = torch.tensor([[0.1, 0.9], [0.9, 0.1], [0.1, 0.9]])
-        targets = torch.tensor([1.0, 1.0, 0.0])
-        acc = get_balanced_accuracy(output, targets)
-        self.assertEqual(acc.item(), 0.25)
-
-    def test_metric_by_task(self):
-        # test metrics with class weights that are not uniform
-
-        output = torch.tensor([[0.1, 0.9, 0.1], [0.9, 0.1, 0.9]])
-        targets = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-        output_map = {"a": 2, "b": 1}
-        config = argparse.Namespace()
-        config.TARGETS_CLASSIFICATION = ["a"]
-        config.TARGETS_REGRESSION = ["b"]
-        metrics = metric_by_task(output, targets, output_map, config)
-        self.assertEqual(metrics.shape, (2,))
-        self.assertEqual(
-            metrics[0], 100 * get_balanced_accuracy(output[:, :2], targets[:, 0].long())
-        )
-        self.assertEqual(
-            metrics[1], F.mse_loss(output[:, 2], targets[:, 1].float()).sqrt()
-        )
+mse = torch.nn.functional.mse_loss
+cce = torch.nn.functional.cross_entropy
 
 
-if __name__ == "__main__":
-    unittest.main(argv=[""], verbosity=2, exit=False)
+def loss_by_task(preds: TensorDict, targets: TensorDict):
+    """Compute the loss for each task.
+
+    Args:
+        preds (TensorDict): The predictions.
+        targets (TensorDict): The targets.
+
+    Returns:
+        TensorDict: The loss for each task.
+    """
+    losses = TensorDict(fields=preds.fields)
+    for field in preds.fields.all_fields:
+        mask = ~targets[field].isna()
+        pred = preds[field][mask]
+        target = targets[field][mask]
+        if field in preds.fields.numerical:
+            losses[field] = mse(pred, target)
+        elif field in preds.fields.categorical:
+            losses[field] = cce(pred, target)
+    return losses
+
+def metric_by_task(preds: TensorDict, targets: TensorDict, transforms: dict):    
+    metrics = TensorDict(fields=preds.fields)
+    for field in preds.fields.all_fields:
+        mask = ~targets[field].isna()
+        pred = preds[field][mask]
+        target = targets[field][mask]
+        if field in preds.fields.numerical:
+            pred = transforms[field].inverse_transform(pred)
+            target = transforms[field].inverse_transform(target)
+            eval_fn = get_eval_fn_for(field)
+            pred = eval_fn(pred, targets["z"], targets["n"])
+            target = eval_fn(target, targets["z"], targets["n"])
+            metrics[field] = mse(pred, target).sqrt()
+        elif field in preds.fields.categorical:
+            metrics[field] = (pred.argmax(dim=-1) == target).float().mean()
+    return metrics
+
+def get_eval_fn_for(task_name):
+  if task_name == "binding":
+    def eval_fn(output, n, z):
+      return output * (n + z)
+    return eval_fn
+  else:
+    return lambda x, _: x
