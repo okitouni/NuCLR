@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from .modules import RNNCell, SwiGLU
 from .utils.tensor_dict import TensorDict
 from .utils.tensor_dict import Fields
 
@@ -24,17 +25,6 @@ class NuCLRWrapper(nn.Module):
         return preds
 
 
-class NuCLR(nn.Module):
-    def __init__(self, d_model, output_dim, n_heads=1, num_layers=1):
-        super().__init__()
-        self.embeddings = nn.Embedding(2, d_model)
-        self.transformer = RetNet(d_model, n_heads=n_heads, num_layers=num_layers)
-        self.readout = nn.Linear(d_model, output_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.readout(self.transformer(x))
-
-
 class RetNet(nn.Module):
     def __init__(self, d_model, n_heads=1, num_layers=1) -> None:
         super().__init__()
@@ -48,24 +38,9 @@ class RetNet(nn.Module):
         return x
 
 
-class SwiGLU(nn.Module):
-    def __init__(self, dim=-1, beta=False):
-        super().__init__()
-        self.sigmoid = nn.Sigmoid()
-        if beta:
-            self.beta = nn.Parameter(torch.ones(1))
-        else:
-            self.beta = 1
-
-    def forward(self, x, dim=-1):
-        x_gate, x_out = x.chunk(2, dim=dim)
-        x_gate = self.sigmoid(self.beta * x_gate) * x_gate
-        return x_gate * x_out
-
-
 class RetBlock(nn.Module):
     def __init__(self, d_model, d_ff=None, n_heads=1):
-        #TODO n_heads
+        # TODO n_heads
         super().__init__()
         if d_ff is None:
             d_ff = d_model * 2
@@ -107,9 +82,11 @@ class Retention(nn.Module):
 
     def forward(self, x):
         K, Q, V = self.kqv(x).chunk(3, dim=-1)
-        QKT = torch.einsum("bij, bkj -> bik", Q, K) / self.d_model**.5 # [batch, seq_len, seq_len]
-        norm = 1+torch.arange(QKT.shape[1], device = QKT.device).sqrt().view(1, -1, 1)
-        R = (torch.tril(QKT) / norm ) # [batch, seq_len, seq_len]
+        QKT = (
+            torch.einsum("bij, bkj -> bik", Q, K) / self.d_model**0.5
+        )  # [batch, seq_len, seq_len]
+        norm = 1 + torch.arange(QKT.shape[1], device=QKT.device).sqrt().view(1, -1, 1)
+        R = torch.tril(QKT) / norm  # [batch, seq_len, seq_len]
         R /= R.sum(-1, keepdim=True).abs().clamp(min=1)
         return R.bmm(V)
 
@@ -129,3 +106,34 @@ class Retention(nn.Module):
         rets = torch.einsum("bsd, bs -> bsd", Q, S)
         return rets, S
 
+
+class RNN(nn.Module):
+    def __init__(self, d_model, output_dim):
+        super().__init__()
+        self.embeddings = nn.Parameter(torch.randn(2 + 2, d_model) / d_model**0.5)
+        self.protonet = RNNCell(d_model)
+        self.neutronet = RNNCell(d_model)
+        self.readout = nn.Linear(2 * d_model, output_dim)
+
+        self.min_proton = 8
+        self.min_neutron = 8
+        self.max_proton = 150
+        self.max_neutron = 200
+
+    def _protons(self, n_p, n_n):
+        emb = self.embeddings[0]
+        for _ in range(n_p - self.min_proton + 1):
+            emb = self.protonet(emb, n_n / self.max_neutron)
+        return emb
+
+    def _neutrons(self, n_n, n_p):
+        emb = self.embeddings[1]
+        for _ in range(n_n - self.min_neutron + 1):
+            emb = self.neutronet(emb, n_p / self.max_proton)
+        return emb
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        protons = torch.vstack([self._protons(n_p, n_n) for n_p, n_n in x[:, :2]])
+        neutrons = torch.vstack([self._neutrons(n_n, n_p) for n_p, n_n in x[:, :2]])
+        out = torch.hstack([protons, neutrons])
+        return self.readout(out)
