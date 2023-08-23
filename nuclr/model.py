@@ -137,3 +137,91 @@ class RNN(nn.Module):
         neutrons = torch.vstack([self._neutrons(n_n, n_p) for n_p, n_n in x[:, :2]])
         out = torch.hstack([protons, neutrons])
         return self.readout(out)
+
+class Model(nn.Module):
+    def __init__(self, d_model, output_dim):
+        super().__init__()
+        # embeddings via RNN
+
+        # proton number = z -> z times application of RNN
+        # neutron number = n -> n times application of RNN
+        # one for proton, one for neutron
+        self.embeddings = nn.Parameter(torch.randn(2, d_model) / d_model**0.5)
+
+        # RNN output (the entire sequence) is concatenated and fed into a Transformer
+        # self.transformer = nn.TransformerEncoder(
+        #     nn.TransformerEncoderLayer(
+        #         d_model=d_model,
+        #         nhead=2,
+        #         dim_feedforward=d_model * 4,
+        #         dropout=0.0,
+        #         activation="gelu",
+        #         batch_first=True,
+        #     ),
+        #     num_layers=2,
+        #     norm=nn.LayerNorm(d_model),
+        # )
+        self.interaction_model = nn.Sequential(
+            nn.Linear(d_model * 2, d_model),
+            nn.SiLU(),
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+        )
+
+        self.proton_rnn = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(d_model, d_model),
+        )
+
+        self.neutron_rnn = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.proton_rnn[-1].weight.data = torch.randn(d_model, d_model) / d_model**0.5
+        self.neutron_rnn[-1].weight.data = (
+            torch.randn(d_model, d_model) / d_model**0.5
+        )
+
+        self.readout = nn.Linear(d_model, output_dim)
+
+    def _protons(self, z):
+        p = self.embeddings[0]
+        return torch.vstack([(p := self.proton_rnn(p)) for _ in range(z)])
+
+    def _neutrons(self, n):
+        p = self.embeddings[1]
+        return torch.vstack([(p := self.neutron_rnn(p)) for _ in range(n)])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        neutrons = x[:, 1]
+        protons = x[:, 0]
+        nmax = neutrons.amax().item()
+        pmax = protons.amax().item()
+        protons = self._protons(pmax)[protons-1]
+        neutrons = self._neutrons(nmax)[neutrons-1]
+        out = torch.cat([protons, neutrons], dim=1)
+        out = self.interaction_model(out)
+        return torch.sigmoid(self.readout(out))
+        # dev = x.device
+        # neutrons = x[:, 1]
+        # protons = x[:, 0]
+        # nmax = neutrons.amax().item()
+        # pmax = protons.amax().item()
+        # neutrons = self._neutrons(nmax)  # [nmax, d_model]
+        # protons = self._protons(pmax)  # [pmax, d_model]
+        # make sequences: (batch, seq_len, d_model)
+        # seq_len == pmax + nmax
+        # for shorter elements in the batch, we can mask things
+        # pn_embeddings = torch.cat([protons, neutrons], dim=0)  # [pmax + nmax, d_model]
+        # make one sequence for each batch element
+        # # sequence = sequence[None].repeat(
+        # #     x.shape[0], 1, 1
+        # # )  # [ batch, pmax + nmax, d_model]
+        # mask elements
+        # proton_mask = torch.arange(pmax, device=dev) >= x[:, [0]]
+        # neutron_mask = torch.arange(nmax, device=dev) >= x[:, [1]]
+        # sequence_mask = torch.cat([proton_mask, neutron_mask], dim=1)
+        # sequence[sequence_mask] = 0
+        # sequence = self.transformer(sequence)  # batch, seq, d_model
+        # sequence = sequence.amax(dim=1)  # batch, d_model
+        # return self.readout(sequence)  # batch, output_dim
