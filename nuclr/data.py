@@ -235,8 +235,74 @@ def get_nuclear_data(datadir, recreate=False):
         df["binding_sys"] = df2.binding_sys
         df.reset_index(inplace=True)
 
+    paths = get_decay_paths_for_nuclei(df)
     df = df[(df.z > 8) & (df.n > 8)]
-    return df
+    return df, paths
+
+def get_decay_paths_for_nuclei(df, verbose=False):
+    df = df.set_index(["z", "n"])
+
+    stable_sel = df.half_life == "STABLE"
+    valid_decays = ["P", "N", "EC+B+", "B+", "EC", "B-", "A", "2P", "2N", "2EC", "2B+", "2B-"]
+    unstable_sel = df.decay_1.isin(valid_decays) & ~stable_sel # for some reason some are stable but also decaying
+    bigger_nuclei_sel = df.index > (8,8)
+    stable_nuclei = df[stable_sel]
+    unstable_nuclei = df[unstable_sel & bigger_nuclei_sel]
+
+    def path_to_stable(z, n):
+        path = [(z,n)]
+        while (z,n) not in stable_nuclei.index:
+            match df.loc[z,n].decay_1:
+                case "P":
+                    z -= 1
+                case "N":
+                    n -= 1
+                case "EC+B+":
+                    z -= 1
+                    n += 1
+                case "B+":
+                    z -= 1
+                    n += 1
+                case "EC":
+                    z -= 1
+                    n += 1
+                case "B-":
+                    z += 1
+                    n -= 1
+                case "A":
+                    z -= 2
+                    n -= 2
+                case "2P":
+                    z -= 2
+                case "2N":
+                    n -= 2
+                case "2EC":
+                    z -= 2
+                    n += 2
+                case "2B+":
+                    z -= 2
+                    n += 2
+                case "2B-":
+                    z += 2
+                    n -= 2
+                case _:
+                    raise ValueError(f"Unknown decay mode {z,n}: \"{df.loc[z,n].decay_1}\"")
+            path.append((z,n))
+        return path[::-1]
+
+    paths = {}
+    for z,n in unstable_nuclei.index:
+        try:
+          path = path_to_stable(z,n)
+          paths[(z,n)] = path
+        except Exception as e:
+            if verbose:
+              print(f"during processing of {z,n}")
+              print(e,"\n")
+    for z,n in stable_nuclei.index:
+        paths[(z,n)] = [(z,n)]
+    return paths
+
 
 
 def _train_test_split_exact(X, train_frac, n_embedding_inputs, seed=1):
@@ -298,7 +364,7 @@ def prepare_nuclear_data(
         recreate (bool, optional): Force re-download of data and save to csv. Defaults to False.
     returns (Data): namedtuple of X, y, vocab_size, output_map, quantile_transformer
     """
-    df = get_nuclear_data(datadir, recreate=recreate)
+    df, paths = get_nuclear_data(datadir, recreate=recreate)
     targets = get_targets(df)
 
     X = torch.tensor(targets[["z", "n"]].values)
