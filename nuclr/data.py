@@ -235,9 +235,9 @@ def get_nuclear_data(datadir, recreate=False):
         df["binding_sys"] = df2.binding_sys
         df.reset_index(inplace=True)
 
-    paths = get_decay_paths_for_nuclei(df)
+    # paths = get_decay_paths_for_nuclei(df)
     df = df[(df.z > 8) & (df.n > 8)]
-    return df, paths
+    return df, {}
 
 def get_decay_paths_for_nuclei(df, verbose=False):
     df = df.set_index(["z", "n"])

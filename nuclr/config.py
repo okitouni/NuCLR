@@ -9,7 +9,7 @@ defaults_dict = {
     "DEV": "cuda:0" if torch.cuda.is_available() else "cpu",
     "TARGETS_CLASSIFICATION": [],
     "TARGETS_REGRESSION": ["binding", "radius"],
-    "TRAIN_FRAC": 0.8,
+    "TRAIN_FRAC": 0.9,
     "SEED": 0,
 }
 

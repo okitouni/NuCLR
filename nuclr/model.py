@@ -1,12 +1,74 @@
 import torch
 from torch import nn
+from typing import Callable
+import mup
 from .modules import RNNCell, SwiGLU
 from .utils.tensor_dict import TensorDict
 from .utils.tensor_dict import Fields
 
+def _append_readout(model_fn: Callable) -> Callable:
+    """Append a muP readout to a model. If the model is a sequential model,
+    the readout replaces the last element in the sequence. Otherwise,
+    the readout layer is expected to be an attribute.
+
+    Args:
+        model_fn (callable): Function which returns a model.
+    """
+
+    def model_fn_with_readout(*args, **kwargs):
+        model = model_fn(*args, **kwargs)
+        # check if model already has a readout, FIXME: this is a hack
+        if any([isinstance(x, mup.MuReadout) for x in model.modules()]):
+            return model
+        if isinstance(model, nn.Sequential):
+            assert isinstance(
+                model[-1], nn.Linear
+            ), "Last layer of sequential model must be linear (readout)"
+            old_readout = model.pop(len(model) - 1)
+            model.append(mup.MuReadout(*old_readout.weight.T.shape))
+        else:
+            assert hasattr(
+                model, "readout"
+            ), "Model must be sequential or have a readout attribute"
+            old_readout = model.readout
+            model.readout = mup.MuReadout(*old_readout.weight.T.shape)
+        return model
+
+    return model_fn_with_readout
+
+
+def make_mup(model_fn, **scale_kwargs) -> nn.Module:
+    """Reinitialize model with mup scaling of relevant dimensions. Takes a function which returns a model and returns a model with mup scaling.
+    Assumes the model has a readout linear layer which is either the last layer in a sequential model or an attribute of the model.
+
+    Args:
+        model_fn (Callable): Function which returns a nn.Module model.
+        init_fn (Callable, optional): Function which initializes the model parameters in-place. Defaults to Kaiming uniform with a = sqrt(5).
+
+    Raises:
+        ValueError: If depth is in scale_kwargs. Depth is not a scaling parameter.
+
+    Returns:
+        nn.Module: Model with mup scaling.
+    """
+
+    model_fn = _append_readout(model_fn)
+    base_kwargs = {k: 32 for k in scale_kwargs}
+    delta_kwargs = {k: 64 for k in scale_kwargs}
+    base = model_fn(**base_kwargs)
+    delta = model_fn(**delta_kwargs)
+    model = model_fn(**scale_kwargs)
+    mup.set_base_shapes(model, base, delta=delta)
+    del base, delta
+    for name, param in model.named_parameters():
+        if "weight" in name.lower():  # FIXME or not
+            mup.init.uniform_(param, -.3, .3)
+            #mup.init.kaiming_uniform_(param, a=5**0.5, nonlinearity="leaky_relu")
+    return model
+
 
 class NuCLRWrapper(nn.Module):
-    def __init__(self, model: nn.Module, pred_fields: Fields):
+    def __init__(self, model_fn, d_model, pred_fields: Fields):
         """Wrapper to make NuCLR models compatible with TensorDicts.
 
         Args:
@@ -14,8 +76,9 @@ class NuCLRWrapper(nn.Module):
             pred_fields (Fields): The name and order of the fields to predict.
         """
         super().__init__()
-        self.model = model
+        self.model = make_mup(model_fn, d_model=d_model)
         self.pred_fields = pred_fields
+        self.readout = self.model.readout
 
     def forward(self, batch: TensorDict):
         preds = TensorDict(fields=self.pred_fields)
